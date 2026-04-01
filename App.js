@@ -9,7 +9,7 @@ import * as Speech from "expo-speech";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { initializeApp } from "firebase/app";
-import { getFirestore, addDoc, collection, getDocs } from "firebase/firestore";
+import { getFirestore, addDoc, collection } from "firebase/firestore";
 
 /* ---------------- FIREBASE ---------------- */
 const firebaseConfig = {
@@ -20,12 +20,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-/* ---------------- AI ---------------- */
-const OPENAI_KEY = "YOUR_OPENAI_KEY";
+/* ---------------- AI (OPTIONAL) ---------------- */
+const OPENAI_KEY = ""; // optional: paste your OpenAI key here
 
 /* ---------------- TF CAMERA ---------------- */
 const TensorCamera = cameraWithTensors(Camera);
-
 let detector;
 let stage = "up";
 let repsGlobal = 0;
@@ -43,7 +42,6 @@ const angle = (a, b, c) => {
 /* ---------------- REP DETECTION ---------------- */
 const detectPushup = (k) => {
   const ang = angle(k[6], k[8], k[10]);
-
   if (ang < 90 && stage === "up") stage = "down";
   if (ang > 160 && stage === "down") {
     stage = "up";
@@ -51,7 +49,6 @@ const detectPushup = (k) => {
   }
   return repsGlobal;
 };
-
 const detectPullup = (k) => {
   if (k[0].y < k[10].y && stage === "down") stage = "up";
   if (k[0].y > k[10].y && stage === "up") {
@@ -60,7 +57,6 @@ const detectPullup = (k) => {
   }
   return repsGlobal;
 };
-
 const detectBench = (k) => {
   const ang = angle(k[6], k[8], k[10]);
   if (ang < 70 && stage === "up") stage = "down";
@@ -71,21 +67,19 @@ const detectBench = (k) => {
   return repsGlobal;
 };
 
-/* ---------------- FORM CHECK ---------------- */
+/* ---------------- FORM ANALYSIS ---------------- */
 const analyze = (k) => {
   const ang = angle(k[6], k[8], k[10]);
   const issues = [];
-
   if (ang > 160) issues.push("Go lower");
   if (ang < 60) issues.push("Too deep");
-  if (Math.abs(k[6].y - k[12].y) > 40)
-    issues.push("Keep body straight");
-
+  if (Math.abs(k[6].y - k[12].y) > 40) issues.push("Keep your body straight");
   return issues;
 };
 
 /* ---------------- AI COACH ---------------- */
 const aiCoach = async (exercise, reps, issues) => {
+  if (!OPENAI_KEY) return null;
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -103,24 +97,21 @@ const aiCoach = async (exercise, reps, issues) => {
         ]
       })
     });
-
     const json = await res.json();
-    return json.choices[0].message.content;
+    return json.choices?.[0]?.message?.content || null;
   } catch {
-    return "Keep going!";
+    return null;
   }
 };
 
 /* ---------------- TRIAL ---------------- */
 const checkTrial = async () => {
-  const key = "trial";
+  const key = "trial_start";
   let start = await AsyncStorage.getItem(key);
-
   if (!start) {
     await AsyncStorage.setItem(key, Date.now().toString());
     return true;
   }
-
   const days = (Date.now() - parseInt(start)) / 86400000;
   return days <= 7;
 };
@@ -131,9 +122,8 @@ export default function App() {
   const [exercise, setExercise] = useState("Pushups");
   const [reps, setReps] = useState(0);
   const [aiEnabled, setAiEnabled] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
   const [screen, setScreen] = useState("home");
-
+  const [feedbackText, setFeedbackText] = useState("");
   const raf = useRef(null);
   let lastRun = 0;
 
@@ -141,14 +131,12 @@ export default function App() {
     (async () => {
       const cam = await Camera.requestCameraPermissionsAsync();
       setHasPermission(cam.status === "granted");
-
       const trial = await checkTrial();
       if (!trial) alert("Trial expired");
-      
       await tf.ready();
       detector = await posedetection.createDetector(
         posedetection.SupportedModels.MoveNet,
-        { modelType: "SinglePoseLightning" }
+        { modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
       );
     })();
   }, []);
@@ -161,69 +149,50 @@ export default function App() {
         return;
       }
       lastRun = now;
-
       const img = images.next().value;
       if (img && detector) {
         const poses = await detector.estimatePoses(img);
         const pose = poses[0];
-
         if (pose) {
-          let r = 0;
           const k = pose.keypoints;
-
+          let r = 0;
           if (exercise === "Pushups") r = detectPushup(k);
           if (exercise === "Pullups") r = detectPullup(k);
           if (exercise === "Bench") r = detectBench(k);
-
           setReps(r);
-
           const issues = analyze(k);
-
-          if (issues.length > 0) {
-            Speech.speak(issues[0]);
-          }
-
+          if (issues.length > 0) Speech.speak(issues[0]);
           if (r > 0 && r % 5 === 0) {
             Speech.speak(`${r} reps`);
-
             if (aiEnabled) {
               const fb = await aiCoach(exercise, r, issues);
-              Speech.speak(fb);
+              if (fb) Speech.speak(fb);
             }
-
-            await addDoc(collection(db, "workouts"), {
-              exercise,
-              reps: r,
-              time: Date.now()
-            });
+            try {
+              await addDoc(collection(db, "workouts"), {
+                exercise,
+                reps: r,
+                time: Date.now()
+              });
+            } catch {}
           }
         }
       }
-
       raf.current = requestAnimationFrame(loop);
     };
-
     loop();
   };
 
   if (hasPermission === null) return <Text>Loading...</Text>;
   if (!hasPermission) return <Text>No camera access</Text>;
 
-  /* ---------------- UI ---------------- */
-
   if (screen === "home") {
     return (
       <View style={{ flex: 1, backgroundColor: "#000", justifyContent: "center", alignItems: "center" }}>
         <Text style={{ color: "#fff", fontSize: 28 }}>AI Fitness Coach</Text>
-
         <TouchableOpacity onPress={() => setScreen("workout")}>
           <Text style={{ color: "cyan", margin: 10 }}>Start Workout</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity onPress={() => setScreen("progress")}>
-          <Text style={{ color: "cyan", margin: 10 }}>Progress</Text>
-        </TouchableOpacity>
-
         <TouchableOpacity onPress={() => setScreen("feedback")}>
           <Text style={{ color: "cyan", margin: 10 }}>Feedback</Text>
         </TouchableOpacity>
@@ -240,21 +209,17 @@ export default function App() {
           onReady={onStream}
           autorender
         />
-
         <View style={{ position: "absolute", top: 50, left: 20 }}>
           <Text style={{ color: "#fff", fontSize: 30 }}>{reps} reps</Text>
-
           {["Pushups", "Pullups", "Bench"].map((e) => (
             <TouchableOpacity key={e} onPress={() => setExercise(e)}>
               <Text style={{ color: "#fff" }}>{e}</Text>
             </TouchableOpacity>
           ))}
-
-          <View style={{ flexDirection: "row" }}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Text style={{ color: "#fff" }}>AI</Text>
             <Switch value={aiEnabled} onValueChange={setAiEnabled} />
           </View>
-
           <TouchableOpacity onPress={() => setScreen("home")}>
             <Text style={{ color: "red" }}>Back</Text>
           </TouchableOpacity>
@@ -263,41 +228,31 @@ export default function App() {
     );
   }
 
-  if (screen === "progress") {
-    return (
-      <View style={{ flex: 1, backgroundColor: "#000", padding: 20 }}>
-        <Text style={{ color: "#fff" }}>Progress screen (data saved)</Text>
-        <TouchableOpacity onPress={() => setScreen("home")}>
-          <Text style={{ color: "cyan" }}>Back</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
   if (screen === "feedback") {
     return (
       <View style={{ flex: 1, backgroundColor: "#000", padding: 20 }}>
         <TextInput
-          placeholder="Feedback"
+          placeholder="Your feedback"
           placeholderTextColor="#888"
           value={feedbackText}
           onChangeText={setFeedbackText}
-          style={{ color: "#fff", borderBottomWidth: 1 }}
+          style={{ color: "#fff", borderBottomWidth: 1, marginBottom: 20 }}
         />
-
         <TouchableOpacity
           onPress={async () => {
-            await addDoc(collection(db, "feedback"), {
-              text: feedbackText
-            });
-            setFeedbackText("");
+            try {
+              await addDoc(collection(db, "feedback"), { text: feedbackText, time: Date.now() });
+              setFeedbackText("");
+              alert("Submitted!");
+            } catch {
+              alert("Error submitting feedback");
+            }
           }}
         >
           <Text style={{ color: "cyan" }}>Submit</Text>
         </TouchableOpacity>
-
         <TouchableOpacity onPress={() => setScreen("home")}>
-          <Text style={{ color: "red" }}>Back</Text>
+          <Text style={{ color: "red", marginTop: 20 }}>Back</Text>
         </TouchableOpacity>
       </View>
     );
